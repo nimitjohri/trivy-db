@@ -130,6 +130,14 @@ func WithStore(store Store) Option {
 	}
 }
 
+// WithSourcePackages keeps unpatched source-package entries that have no binary counterpart
+// (stored under SourcePackagePrefix). Not for OSS: Trivy matches binary package names only.
+func WithSourcePackages() Option {
+	return func(src *VulnSrc) {
+		src.parser.IncludeSourcePackages = true
+	}
+}
+
 type VulnSrc struct {
 	store      Store
 	dbc        db.Operation

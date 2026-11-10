@@ -229,3 +229,42 @@ func TestParser_Description(t *testing.T) {
 	assert.Equal(t, "Description from CVE-2024-22222 (not stored for RHSA-2024:9999)", parser.Description("CVE-2024-22222"))
 	assert.Empty(t, parser.Description("CVE-NONEXISTENT"))
 }
+
+func TestParser_Parse_SourcePackages(t *testing.T) {
+	stream := csaf.CPE("cpe:/o:redhat:enterprise_linux:10")
+	collect := func(t *testing.T, includeSource bool) map[Bucket]RawEntries {
+		parser := NewParser()
+		parser.IncludeSourcePackages = includeSource
+		require.NoError(t, parser.Parse("testdata/source-only"))
+		got := map[Bucket]RawEntries{}
+		for bkt, entries := range parser.Advisories() {
+			got[bkt] = entries
+		}
+		return got
+	}
+
+	t.Run("disabled by default: only binary advisories, as before", func(t *testing.T) {
+		want := map[Bucket]RawEntries{
+			{Package: Package{Name: "foo-libs"}, VulnerabilityID: "CVE-2025-0002"}: {
+				{Status: types.StatusAffected, Severity: types.SeverityHigh, CPE: stream},
+			},
+		}
+		require.Equal(t, want, collect(t, false))
+	})
+
+	t.Run("enabled: unpatched source-only advisories are kept without binary counterpart", func(t *testing.T) {
+		want := map[Bucket]RawEntries{
+			{Package: Package{Name: SourcePackagePrefix + "kernel"}, VulnerabilityID: "CVE-2025-0001"}: {
+				{Status: types.StatusAffected, Severity: types.SeverityHigh, CPE: stream},
+			},
+			{Package: Package{Name: SourcePackagePrefix + "bar"}, VulnerabilityID: "CVE-2025-0003"}: {
+				{Status: types.StatusWillNotFix, Severity: types.SeverityHigh, CPE: stream},
+			},
+			// Binary entry is kept as before; the source entry for the same stream is not added.
+			{Package: Package{Name: "foo-libs"}, VulnerabilityID: "CVE-2025-0002"}: {
+				{Status: types.StatusAffected, Severity: types.SeverityHigh, CPE: stream},
+			},
+		}
+		require.Equal(t, want, collect(t, true))
+	})
+}

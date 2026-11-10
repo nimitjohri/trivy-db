@@ -10,6 +10,10 @@ import (
 	"github.com/aquasecurity/trivy-db/pkg/types"
 )
 
+// SourcePackagePrefix prefixes the package name of entries derived from source packages
+// (see Parser.IncludeSourcePackages), so they never collide with binary package names.
+const SourcePackagePrefix = "src:"
+
 type Package struct {
 	Module string
 	Name   string

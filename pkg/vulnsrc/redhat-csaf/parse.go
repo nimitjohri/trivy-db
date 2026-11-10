@@ -37,6 +37,27 @@ type Parser struct {
 	releaseDates map[VulnerabilityID]time.Time
 	// descriptions holds vulnerability description from notes[category=description].
 	descriptions map[VulnerabilityID]string
+
+	// IncludeSourcePackages makes the parser keep unpatched `arch=src` products
+	// when the advisory has no unpatched binary product for the same CPE and status.
+	// They are stored under SourcePackagePrefix+<source name>. Off by default (OSS behavior).
+	IncludeSourcePackages bool
+
+	// Per-vulnerability scratch state, reset in parseVulnerability.
+	srcCandidates   []srcCandidate
+	unpatchedBinary set.Set[streamStatus]
+}
+
+// srcCandidate is an unpatched source package entry held back until the whole
+// vulnerability is parsed, so we know whether binary entries cover the same stream.
+type srcCandidate struct {
+	pkg   Package
+	entry RawEntry
+}
+
+type streamStatus struct {
+	CPE    csaf.CPE
+	Status types.Status
 }
 
 func NewParser() Parser {
@@ -204,6 +225,9 @@ func (p *Parser) parseVulnerability(adv CSAFAdvisory, vuln *csaf.Vulnerability) 
 		return nil
 	}
 
+	p.srcCandidates = nil
+	p.unpatchedBinary = set.New[streamStatus]()
+
 	severities := p.parseThreats(vuln.Threats)
 
 	cveID := VulnerabilityID(lo.FromPtr(vuln.CVE))
@@ -216,7 +240,35 @@ func (p *Parser) parseVulnerability(adv CSAFAdvisory, vuln *csaf.Vulnerability) 
 	for _, remediation := range vuln.Remediations {
 		p.parseRemediation(adv, remediation, cveID, desc, severities)
 	}
+	p.flushSourceCandidates(cveID, desc)
 	return nil
+}
+
+// flushSourceCandidates stores the held-back unpatched source package entries, but only for
+// CPE/status pairs with no unpatched binary entry. Where binaries are listed, source entries add
+// nothing and are not stored, so existing binary-based results are unchanged.
+func (p *Parser) flushSourceCandidates(cveID VulnerabilityID, desc string) {
+	type key struct {
+		Package
+		RawEntry
+	}
+	uniq := set.New[key]()
+	for _, c := range p.srcCandidates {
+		if p.unpatchedBinary.Contains(streamStatus{CPE: c.entry.CPE, Status: c.entry.Status}) {
+			continue
+		}
+		k := key{Package: c.pkg, RawEntry: c.entry}
+		if uniq.Contains(k) {
+			continue
+		}
+		uniq.Append(k)
+		if desc != "" {
+			if _, exists := p.descriptions[cveID]; !exists {
+				p.descriptions[cveID] = desc
+			}
+		}
+		p.addRawEntry(c.pkg, cveID, c.entry)
+	}
 }
 
 func (p *Parser) parseRemediation(
@@ -295,9 +347,24 @@ func (p *Parser) parseRemediation(
 			// included for unpatched vulnerabilities, so we can safely skip source packages.
 			// cf. https://issues.redhat.com/browse/SECDATA-1097
 			//
+			// Red Hat has since listed some unpatched vulnerabilities (e.g. CVE-2025-40186 on RHEL 10)
+			// with the source package only. With IncludeSourcePackages we hold those back, and
+			// flushSourceCandidates keeps them when no unpatched binary covers the same stream.
+			//
 			// TODO(v3): In Trivy DB v3, consider storing only source package names instead
 			// of binary package names for better storage efficiency, as one source package
 			// typically produces multiple binary packages.
+			if p.IncludeSourcePackages && status != types.StatusFixed {
+				p.srcCandidates = append(p.srcCandidates, srcCandidate{
+					pkg: Package{Module: product.Module, Name: SourcePackagePrefix + product.Package.Name},
+					// No Arch: the entry applies to every architecture of the source's binaries.
+					entry: RawEntry{
+						Severity: severities[*productID],
+						CPE:      product.Stream,
+						Status:   status,
+					},
+				})
+			}
 			continue
 		}
 
@@ -373,6 +440,9 @@ func (p *Parser) parseRemediation(
 		}
 		uniq.Append(key)
 
+		if status != types.StatusFixed {
+			p.unpatchedBinary.Append(streamStatus{CPE: product.Stream, Status: status})
+		}
 		p.addRawEntry(pkg, vulnID, rawEntry)
 	}
 }
